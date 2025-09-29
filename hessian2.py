@@ -63,7 +63,7 @@ Hessian Bytecode map:
 """
 
 
-def hessian2_dumps(v: Any) -> bytes:
+def hessian2_dumps(v: Any, **kwargs) -> bytes:
     """
     将一个对象按照 hessian 序列化协议转换为字节数组
 
@@ -91,7 +91,7 @@ def hessian2_dumps(v: Any) -> bytes:
     return serializer.export()
 
 
-def hessian2_loads(data: bytes) -> Any:
+def hessian2_loads(data: bytes, **kwargs) -> Any:
     """
     将字节数组按照 hessian 序列化协议转换为对象
 
@@ -119,7 +119,7 @@ def hessian2_loads(data: bytes) -> Any:
 
 class Hessian2Serializer:
 
-    def __init__(self):
+    def __init__(self, **kwargs):
         self._bytes: bytearray = bytearray()
 
     def export(self) -> bytes:
@@ -315,7 +315,7 @@ class _ByteReader:
 
 
 class Hessian2Deserializer:
-    def __init__(self, data: bytes):
+    def __init__(self, data: bytes, **kwargs):
         self._reader = _ByteReader(data)
 
     def read(self) -> Any:
