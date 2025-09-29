@@ -1,3 +1,5 @@
+from email.contentmanager import raw_data_manager
+
 import py3_hessian2_rsimpl
 from datetime import datetime
 import time
@@ -91,7 +93,7 @@ def hessian2_dumps(v: Any, **kwargs) -> bytes:
     return serializer.export()
 
 
-def hessian2_loads(data: bytes, **kwargs) -> Any:
+def hessian2_loads(data: bytes, *, assuming_x34_as_bytes: bool = False, **kwargs) -> Any:
     """
     将字节数组按照 hessian 序列化协议转换为对象
 
@@ -114,7 +116,7 @@ def hessian2_loads(data: bytes, **kwargs) -> Any:
     # if py3_hessian2_rsimpl:
     #     return py3_hessian2_rsimpl.hessian2_loads(data)
 
-    return Hessian2Deserializer(data).read()
+    return Hessian2Deserializer(data).read(assuming_x34_as_bytes=assuming_x34_as_bytes)
 
 
 class Hessian2Serializer:
@@ -218,58 +220,63 @@ class Hessian2Serializer:
         #        ::= 'S' b1 b0 <utf8-data>  # string of length 0-65535
         #        ::= [x00-x1f] <utf8-data>  # string of length 0-31
         #        ::= [x30-x34] <utf8-data>  # string of length 0-1023
+        if v is None:
+            self.write_null()
+            return
         if not v:
-            self._bytes.append(0x00)  # empty string
+            self._bytes.append(0x00)
             return
 
-        data = v.encode()
-        length = len(data)
+        l = len(v)  # 按字符计算，而不是按字节
 
-        if length <= 32:
+        if l <= 32:
             # utf-8 string length 0-32
-            self._bytes.append(0x00 + length)
-            self._bytes.extend(data)
-        elif length <= 1023:
+            self._bytes.append(0x00 + l)
+            self._bytes.extend(v.encode())
+        elif l <= 1023:
             # utf-8 string length 0-1023
-            self._bytes.append(0x30 + (length >> 8))
-            self._bytes.append(length & 0xff)
-            self._bytes.extend(data)
+            self._bytes.append(0x30 + (l >> 8))
+            self._bytes.append(l & 0xff)
+            self._bytes.extend(v.encode())
         else:
             # utf-8 string split into 64K chunks
-            chunks = [data[i:i + 0xffff] for i in range(0, length, 0xffff)]
-            for chunk in chunks:
-                l = len(chunk)
-                self._bytes.append(0x52 if l == 0xffff else 0x53)  # 'R' for non-final chunk, 'S' for final chunk
-                self._bytes.extend(pack('>H', l))
-                self._bytes.extend(chunk)
+            chunks = [v[i:i + 0x8000] for i in range(0, l, 0x8000)]
+            for idx, chunk in enumerate(chunks):
+                is_last_chunk = idx == len(chunks) - 1
+                self._bytes.extend(pack('>cH', b'S' if is_last_chunk else b'R', len(chunk)))  # 'R' for non-final chunk, 'S' for final chunk
+                self._bytes.extend(chunk.encode())
 
     def write_bytes(self, v: bytes) -> None:
         # binary ::= 'A; b1 b0 <binary-data>  # non-final chunk
         #        ::= 'B' b1 b0 <binary-data>  # final chunk
         #        ::= [x20-x2f] <binary-data>  # binary data of length 0-15
         #        ::= [x34-x37] <binary-data>  # binary data of length 0-1023
+        if v is None:
+            self.write_null()
+            return
         if not v:
-            self._bytes.append(0x20)  # empty binary
+            self._bytes.append(0x20)
             return
 
-        length = len(v)
+        # 将字节数组按 4093 拆分为 chunks
+        # 至于为什么是 4093 是为了和 java 实现保持一致
+        chunks = [v[i:i + 4093] for i in range(0, len(v), 4093)]
+        for idx, chunk in enumerate(chunks):
+            is_last_chunk = idx == len(chunks) - 1
 
-        if length <= 16:
-            # binary length 0-16
-            self._bytes.append(0x20 + length)
-            self._bytes.extend(v)
-        elif length <= 1023:
-            # binary length 0-1023
-            self._bytes.append(0x34 + (length >> 8))
-            self._bytes.append(length & 0xff)
-            self._bytes.extend(v)
-        else:
-            # binary split into 64K chunks
-            chunks = [v[i:i + 0xffff] for i in range(0, length, 0xffff)]
-            for chunk in chunks:
-                l = len(chunk)
-                self._bytes.append(0x41 if l == 0xffff else 0x42)  # 'A' for non-final chunk, 'B' for final chunk
-                self._bytes.extend(pack('>H', l))
+            l = len(chunk)
+            if l <= 15:
+                # binary length 0-16
+                self._bytes.append(0x20 + l)
+                self._bytes.extend(chunk)
+            elif l <= 1023:
+                # binary length 0-1023
+                self._bytes.append(0x34 + (l >> 8))
+                self._bytes.append(l & 0xff)
+                self._bytes.extend(chunk)
+            else:
+                # chunk
+                self._bytes.extend(pack('>cH', b'B' if is_last_chunk else b'A', l))  # 'A' for non-final chunk, 'B' for final chunk
                 self._bytes.extend(chunk)
 
     def write_datetime(self, v: datetime) -> None:
@@ -280,45 +287,42 @@ class Hessian2Serializer:
         self._bytes.extend(pack('>cq', b'J', ts))
 
     def write_list(self, v: list) -> None:
-        raise NotImplementedError
+        # list ::= x55 type value* 'Z'   # variable-length list
+        #      ::= 'V' type int value*   # fixed-length list
+        #      ::= x57 value* 'Z'        # variable-length untyped list
+        #      ::= x58 int value*        # fixed-length untyped list
+        #      ::= [x70-77] type value*  # fixed-length typed list
+        #      ::= [x78-7f] value*       # fixed-length untyped list
+        # will only encode as fixed-length untyped list
+        l = len(v)
+        if l <= 15:
+            self._bytes.append(0x78 + l)
+        else:
+            self._bytes.append(0x58)
+            self.write_int(l)
+        for e in v:
+            self.write(e)
 
     def write_map(self, v: dict) -> None:
+        # map ::= 'M' type (value value)* 'Z'  # key, value map pairs
+        # 	  ::= 'H' (value value)* 'Z'       # untyped key, value
         raise NotImplementedError
 
     def write_object(self, v: dict) -> None:
+        # object ::= 'O' int value*
+        # 	     ::= [x60-x6f] value*
         raise NotImplementedError
 
     def write_type(self, type_name: str) -> None:
         raise NotImplementedError
 
 
-class _ByteReader:
-    def __init__(self, data: bytes):
-        self._data = data
-        self._pos = 0
-
-    def look_byte(self) -> int:
-        return self._data[self._pos]
-
-    def next_byte(self) -> int:
-        v = self._data[self._pos]
-        self._pos += 1
-        return v
-
-    def next_bytes(self, length: int) -> bytes:
-        v = self._data[self._pos:self._pos + length]
-        self._pos += length
-        return v
-
-    def skip(self, length: int = 1) -> None:
-        self._pos += length
-
-
 class Hessian2Deserializer:
+
     def __init__(self, data: bytes, **kwargs):
         self._reader = _ByteReader(data)
 
-    def read(self) -> Any:
+    def read(self, *, assuming_x34_as_bytes: bool) -> Any:
         b = self._reader.look_byte()
         if b == 0x4e:  # 'N'
             # null ::= 'N'
@@ -348,7 +352,7 @@ class Hessian2Deserializer:
             #        ::= x5e b1 b0             # short cast to double
             #        ::= x5f b3 b2 b1 b0       # 32-bit float cast to double
             return self.read_float()
-        elif b == 0x52 or b == 0x53 or 0x00 <= b <= 0x1f or 0x30 <= b <= 0x34:
+        elif b == 0x52 or b == 0x53 or 0x00 <= b <= 0x1f or 0x30 <= b <= 0x33 or (b == 0x34 and not assuming_x34_as_bytes):
             # string ::= 'R' b1 b0 <utf8-data>  # non-final chunk
             #        ::= 'S' b1 b0 <utf8-data>  # string of length 0-65535
             #        ::= [x00-x1f] <utf8-data>  # string of length 0-31
@@ -441,43 +445,71 @@ class Hessian2Deserializer:
         #        ::= 'S' b1 b0 <utf8-data>  # string of length 0-65535
         #        ::= [x00-x1f] <utf8-data>  # string of length 0-31
         #        ::= [x30-x34] <utf8-data>  # string of length 0-1023
+        buf = bytearray()
         b = self._reader.next_byte()
         if b == 0x52:  # read non-final chunk until final chunk
             while b == 0x52:
-                l, = unpack('>h', self._reader.next_bytes(2))
-                self._reader.next_bytes(l)
+                l, = unpack('>H', self._reader.next_bytes(2))
+                buf.extend(self._read_utf8_bytes(l))
                 b = self._reader.next_byte()
         if b == 0x53:
-            l, = unpack('>h', self._reader.next_bytes(2))
-            return self._reader.next_bytes(l).decode()
+            l, = unpack('>H', self._reader.next_bytes(2))
+            buf.extend(self._read_utf8_bytes(l))
+            return buf.decode()
         if 0x00 <= b <= 0x1f:
             l = b - 0x00
-            return self._reader.next_bytes(l).decode()
+            buf.extend(self._read_utf8_bytes(l))
+            return buf.decode()
         if 0x30 <= b <= 0x34:
             l = ((b - 0x30) << 8) + self._reader.next_byte()
-            return self._reader.next_bytes(l).decode()
+            buf.extend(self._read_utf8_bytes(l))
+            return buf.decode()
         raise AssertionError("Unsupported token: {b}")
+
+    def _read_utf8_bytes(self, n_chars: int) -> bytes:
+        count = 0
+        pos = self._reader.pos()
+        start_pos = self._reader.pos()
+        raw_data = self._reader.raw_data_unsafe()
+        while count < n_chars:
+            count += 1
+
+            b = raw_data[pos]
+            if b < 0x80:
+                pos += 1
+            elif b < 0xe0:
+                pos += 2
+            elif b < 0xf0:
+                pos += 3
+            else:
+                pos += 4
+
+        return self._reader.next_bytes(pos - start_pos)
 
     def read_bytes(self) -> bytes:
         # binary ::= 'A; b1 b0 <binary-data>  # non-final chunk
         #        ::= 'B' b1 b0 <binary-data>  # final chunk
         #        ::= [x20-x2f] <binary-data>  # binary data of length 0-15
         #        ::= [x34-x37] <binary-data>  # binary data of length 0-102
+        buf = bytearray()
         b = self._reader.next_byte()
         if b == 0x41:  # read non-final chunk until final chunk
             while b == 0x41:
                 l, = unpack('>h', self._reader.next_bytes(2))
-                self._reader.next_bytes(l)
+                buf.extend(self._reader.next_bytes(l))
                 b = self._reader.next_byte()
         if b == 0x42:
             l, = unpack('>h', self._reader.next_bytes(2))
-            return self._reader.next_bytes(l)
+            buf.extend(self._reader.next_bytes(l))
+            return bytes(buf)
         if 0x20 <= b <= 0x2f:
             l = b - 0x20
-            return self._reader.next_bytes(l)
+            buf.extend(self._reader.next_bytes(l))
+            return bytes(buf)
         if 0x34 <= b <= 0x37:
             l = ((b - 0x34) << 8) + self._reader.next_byte()
-            return self._reader.next_bytes(l)
+            buf.extend(self._reader.next_bytes(l))
+            return bytes(buf)
         raise AssertionError("Unsupported token: {b}")
 
     def read_datetime(self) -> datetime:
@@ -491,6 +523,34 @@ class Hessian2Deserializer:
             v, = unpack('>l', self._reader.next_bytes(4))
             return datetime.fromtimestamp(v * 60)
         raise AssertionError("Unsupported token: {b}")
+
+
+class _ByteReader:
+    def __init__(self, data: bytes):
+        self._data = data
+        self._pos = 0
+
+    def look_byte(self) -> int:
+        return self._data[self._pos]
+
+    def next_byte(self) -> int:
+        v = self._data[self._pos]
+        self._pos += 1
+        return v
+
+    def next_bytes(self, length: int) -> bytes:
+        v = self._data[self._pos:self._pos + length]
+        self._pos += length
+        return v
+
+    def skip(self, length: int = 1) -> None:
+        self._pos += length
+
+    def pos(self) -> int:
+        return self._pos
+
+    def raw_data_unsafe(self) -> bytes:
+        return self._data
 
 
 def helloworld():

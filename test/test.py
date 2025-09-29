@@ -91,32 +91,54 @@ class Test(unittest.TestCase):
         self.assertAlmostEqual(hessian2_loads(b'\x44\x3f\xf1\x99\x99\x99\x99\x99\x9a'), 1.1, places=15)
 
     def test_encode_binary(self):
+        self.assertEqual(hessian2_dumps(b''), b'\x20')
+        self.assertEqual(hessian2_dumps(b'\x00'), b'\x21\x00')
+        self.assertEqual(hessian2_dumps(b'\xff'), b'\x21\xff')
         self.assertEqual(hessian2_dumps(b'hello'), b'\x25\x68\x65\x6c\x6c\x6f')
+        self.assertEqual(hessian2_dumps(b'a' * 15), b'\x2f' + b'\x61' * 15)
+        self.assertEqual(hessian2_dumps(b'a' * 16), b'\x34\x10' + b'\x61' * 16)
+        self.assertEqual(hessian2_dumps(b'a' * 127), b'\x34\x7f' + b'\x61' * 127)
         self.assertEqual(hessian2_dumps(b'a' * 128), b'\x34\x80' + b'\x61' * 128)
-        self.assertEqual(hessian2_dumps(b'abc' * 1024), b'\x42\x0c\x00' + b'\x61\x62\x63' * 1024)
-        # TODO self.assertEqual(hessian2_dumps(b'abcdefghijklmnopqrstuvwxyz' * 65535), b'\x34\x80\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61')
+        self.assertEqual(hessian2_dumps(b'a' * 1023), b'\x37\xff' + b'\x61' * 1023)
+        self.assertEqual(hessian2_dumps(b'a' * 1024), b'\x42\x04\x00' + b'\x61' * 1024)
+        self.assertEqual(hessian2_dumps(b'a' * 4096), self._read_file('long_bytes_4096.txt'))
+        self.assertEqual(hessian2_dumps(b'a' * 5000), self._read_file('long_bytes_5000.txt'))
+        self.assertEqual(hessian2_dumps(b'a' * 65535), self._read_file('long_bytes_65535.txt'))
 
     def test_decode_binary(self):
+        self.assertEqual(hessian2_loads(b'\x20'), b'')
+        self.assertEqual(hessian2_loads(b'\x21\x00'), b'\x00')
+        self.assertEqual(hessian2_loads(b'\x21\xff'), b'\xff')
         self.assertEqual(hessian2_loads(b'\x25\x68\x65\x6c\x6c\x6f'), b'hello')
-        # self.assertEqual(hessian2_loads(b'\x34\x80' + b'\x61' * 128), b'a' * 128)
-        # 对于长二进制数据，可以简化为检查长度和部分内容
-        decoded = hessian2_loads(b'\x42\x0c\x00' + b'\x61\x62\x63' * 1024)
-        self.assertEqual(len(decoded), 3 * 1024)
-        self.assertEqual(decoded[:6], b'abcabc')
+        self.assertEqual(hessian2_loads(b'\x2f' + b'\x61' * 15), b'a' * 15)
+        self.assertEqual(hessian2_loads(b'\x34\x10' + b'\x61' * 16, assuming_x34_as_bytes=True), b'a' * 16)
+        self.assertEqual(hessian2_loads(b'\x34\x7f' + b'\x61' * 127, assuming_x34_as_bytes=True), b'a' * 127)
+        self.assertEqual(hessian2_loads(b'\x34\x80' + b'\x61' * 128, assuming_x34_as_bytes=True), b'a' * 128)
+        self.assertEqual(hessian2_loads(b'\x37\xff' + b'\x61' * 1023), b'a' * 1023)
+        self.assertEqual(hessian2_loads(b'\x42\x04\x00' + b'\x61' * 1024), b'a' * 1024)
+        self.assertEqual(hessian2_loads(self._read_file('long_bytes_4096.txt')), b'a' * 4096)
+        self.assertEqual(hessian2_loads(self._read_file('long_bytes_5000.txt')), b'a' * 5000)
+        self.assertEqual(hessian2_loads(self._read_file('long_bytes_65535.txt')), b'a' * 65535)
 
     def test_encode_string(self):
+        self.assertEqual(hessian2_dumps(''), b'\x00')
         self.assertEqual(hessian2_dumps('hello'), b'\x05\x68\x65\x6c\x6c\x6f')
         self.assertEqual(hessian2_dumps('a' * 128), b'\x30\x80' + b'\x61' * 128)
+        self.assertEqual(hessian2_dumps('中文测试'), b'\x04\xe4\xb8\xad\xe6\x96\x87\xe6\xb5\x8b\xe8\xaf\x95')
+        self.assertEqual(hessian2_dumps('一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一'), b'\x1f\xe4\xb8\x80\xe4\xba\x8c\xe4\xb8\x89\xe5\x9b\x9b\xe4\xba\x94\xe5\x85\xad\xe4\xb8\x83\xe5\x85\xab\xe4\xb9\x9d\xe5\x8d\x81\xe4\xb8\x80\xe4\xba\x8c\xe4\xb8\x89\xe5\x9b\x9b\xe4\xba\x94\xe5\x85\xad\xe4\xb8\x83\xe5\x85\xab\xe4\xb9\x9d\xe5\x8d\x81\xe4\xb8\x80\xe4\xba\x8c\xe4\xb8\x89\xe5\x9b\x9b\xe4\xba\x94\xe5\x85\xad\xe4\xb8\x83\xe5\x85\xab\xe4\xb9\x9d\xe5\x8d\x81\xe4\xb8\x80')
         self.assertEqual(hessian2_dumps('abc' * 1024), b'\x53\x0c\x00' + b'\x61\x62\x63' * 1024)
-        # TODO self.assertEqual(hessian2_dumps('abcdefghijklmnopqrstuvwxyz' * 65535), b'\x34\x80\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61\x61')
+        self.assertEqual(hessian2_dumps('啊' * 32768), b'\x53\x80\x00' + b'\xe5\x95\x8a' * 32768)
+        self.assertEqual(hessian2_dumps('helloworld我人有的和' * 80000), self._read_file('long_str1.txt'))
 
     def test_decode_string(self):
+        self.assertEqual(hessian2_loads(b'\x00'), '')
         self.assertEqual(hessian2_loads(b'\x05\x68\x65\x6c\x6c\x6f'), 'hello')
         self.assertEqual(hessian2_loads(b'\x30\x80' + b'\x61' * 128), 'a' * 128)
-        # 对于长字符串，可以简化为检查长度和部分内容
-        decoded = hessian2_loads(b'\x53\x0c\x00' + b'\x61\x62\x63' * 1024)
-        self.assertEqual(len(decoded), 3 * 1024)
-        self.assertEqual(decoded[:6], 'abcabc')
+        self.assertEqual(hessian2_loads(b'\x04\xe4\xb8\xad\xe6\x96\x87\xe6\xb5\x8b\xe8\xaf\x95'), '中文测试')
+        self.assertEqual(hessian2_loads(b'\x1f\xe4\xb8\x80\xe4\xba\x8c\xe4\xb8\x89\xe5\x9b\x9b\xe4\xba\x94\xe5\x85\xad\xe4\xb8\x83\xe5\x85\xab\xe4\xb9\x9d\xe5\x8d\x81\xe4\xb8\x80\xe4\xba\x8c\xe4\xb8\x89\xe5\x9b\x9b\xe4\xba\x94\xe5\x85\xad\xe4\xb8\x83\xe5\x85\xab\xe4\xb9\x9d\xe5\x8d\x81\xe4\xb8\x80\xe4\xba\x8c\xe4\xb8\x89\xe5\x9b\x9b\xe4\xba\x94\xe5\x85\xad\xe4\xb8\x83\xe5\x85\xab\xe4\xb9\x9d\xe5\x8d\x81\xe4\xb8\x80'), '一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一')
+        self.assertEqual(hessian2_loads(b'\x53\x0c\x00' + b'\x61\x62\x63' * 1024), 'abc' * 1024)
+        self.assertEqual(hessian2_loads(b'\x53\x80\x00' + b'\xe5\x95\x8a' * 32768), '啊' * 32768)
+        self.assertEqual(hessian2_loads(self._read_file('long_str1.txt')), 'helloworld我人有的和' * 80000)
 
     def test_encode_date(self):
         self.assertEqual(hessian2_dumps(datetime.datetime(2021, 2, 3, 11, 22, 33)), b'\x4a\x00\x00\x01\x77\x65\xe9\xbc\xa8')
@@ -125,5 +147,6 @@ class Test(unittest.TestCase):
         decoded = hessian2_loads(b'\x4a\x00\x00\x01\x77\x65\xe9\xbc\xa8')
         self.assertEqual(decoded, datetime.datetime(2021, 2, 3, 11, 22, 33))
 
-    if __name__ == '__main__':
-        unittest.main()
+    def _read_file(self, filename: str) -> bytes:
+        with open(filename, 'r') as f:
+            return f.read().strip().encode().decode("unicode_escape").encode("latin1")
