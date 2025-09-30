@@ -111,9 +111,9 @@ class Test(unittest.TestCase):
         self.assertEqual(hessian2_loads(b'\x21\xff'), b'\xff')
         self.assertEqual(hessian2_loads(b'\x25\x68\x65\x6c\x6c\x6f'), b'hello')
         self.assertEqual(hessian2_loads(b'\x2f' + b'\x61' * 15), b'a' * 15)
-        self.assertEqual(hessian2_loads(b'\x34\x10' + b'\x61' * 16, assuming_x34_as_bytes=True), b'a' * 16)
-        self.assertEqual(hessian2_loads(b'\x34\x7f' + b'\x61' * 127, assuming_x34_as_bytes=True), b'a' * 127)
-        self.assertEqual(hessian2_loads(b'\x34\x80' + b'\x61' * 128, assuming_x34_as_bytes=True), b'a' * 128)
+        self.assertEqual(hessian2_loads(b'\x34\x10' + b'\x61' * 16), b'a' * 16)
+        self.assertEqual(hessian2_loads(b'\x34\x7f' + b'\x61' * 127), b'a' * 127)
+        self.assertEqual(hessian2_loads(b'\x34\x80' + b'\x61' * 128), b'a' * 128)
         self.assertEqual(hessian2_loads(b'\x37\xff' + b'\x61' * 1023), b'a' * 1023)
         self.assertEqual(hessian2_loads(b'\x42\x04\x00' + b'\x61' * 1024), b'a' * 1024)
         self.assertEqual(hessian2_loads(self._read_file('long_bytes_4096.txt')), b'a' * 4096)
@@ -129,6 +129,12 @@ class Test(unittest.TestCase):
         self.assertEqual(hessian2_dumps('abc' * 1024), b'\x53\x0c\x00' + b'\x61\x62\x63' * 1024)
         self.assertEqual(hessian2_dumps('啊' * 32768), b'\x53\x80\x00' + b'\xe5\x95\x8a' * 32768)
         self.assertEqual(hessian2_dumps('helloworld我人有的和' * 80000), self._read_file('long_str1.txt'))
+        self.assertEqual(hessian2_dumps('\x00'), b'\x01\x00')
+        self.assertEqual(hessian2_dumps('\xff'), b'\x01\xc3\xbf')
+        self.assertEqual(hessian2_dumps('\u00a9'), b'\x01\xc2\xa9')
+        self.assertEqual(hessian2_dumps('a' * 15), b'\x0f' + b'\x61' * 15)
+        self.assertEqual(hessian2_dumps('a' * 16), b'\x10' + b'\x61' * 16)
+        self.assertEqual(hessian2_dumps('a' * 2048), b'\x53\x08\x00' + b'\x61' * 2048)
 
     def test_decode_string(self):
         self.assertEqual(hessian2_loads(b'\x00'), '')
@@ -139,6 +145,12 @@ class Test(unittest.TestCase):
         self.assertEqual(hessian2_loads(b'\x53\x0c\x00' + b'\x61\x62\x63' * 1024), 'abc' * 1024)
         self.assertEqual(hessian2_loads(b'\x53\x80\x00' + b'\xe5\x95\x8a' * 32768), '啊' * 32768)
         self.assertEqual(hessian2_loads(self._read_file('long_str1.txt')), 'helloworld我人有的和' * 80000)
+        self.assertEqual(hessian2_loads(b'\x01\x00'), '\x00')
+        self.assertEqual(hessian2_loads(b'\x01\xc3\xbf'), '\xff')
+        self.assertEqual(hessian2_loads(b'\x01\xc2\xa9'), '\u00a9')
+        self.assertEqual(hessian2_loads(b'\x0f' + b'\x61' * 15), 'a' * 15)
+        self.assertEqual(hessian2_loads(b'\x10' + b'\x61' * 16), 'a' * 16)
+        self.assertEqual(hessian2_loads(b'\x53\x08\x00' + b'\x61' * 2048), 'a' * 2048)
 
     def test_encode_date(self):
         self.assertEqual(hessian2_dumps(datetime.datetime(2021, 2, 3, 11, 22, 33)), b'\x4a\x00\x00\x01\x77\x65\xe9\xbc\xa8')
@@ -147,6 +159,29 @@ class Test(unittest.TestCase):
         decoded = hessian2_loads(b'\x4a\x00\x00\x01\x77\x65\xe9\xbc\xa8')
         self.assertEqual(decoded, datetime.datetime(2021, 2, 3, 11, 22, 33))
 
-    def _read_file(self, filename: str) -> bytes:
+    def test_encode_list(self):
+        pass
+
+    def test_decode_list(self):
+        pass
+
+    def test_encode_map(self):
+        self.assertEqual(hessian2_dumps({'a': 1, 'b': None, 'c': '3'}), b'\x48\x01\x61\x91\x01\x62\x4e\x01\x63\x01\x33\x5a')
+        self.assertEqual(hessian2_dumps({1: '1', 2: '2'}), b'\x48\x91\x01\x31\x92\x01\x32\x5a')
+        self.assertEqual(hessian2_dumps({1.0: '1.0', 2.2: '2.2'}), b'\x48\x5c\x03\x31\x2e\x30\x5f\x00\x00\x08\x98\x03\x32\x2e\x32\x5a')
+        m = {'a': '1', 'b': '2'}
+        self.assertEqual(hessian2_dumps({'m1': m, 'm2': m}), b'\x48\x02\x6d\x31\x48\x01\x61\x01\x31\x01\x62\x01\x32\x5a\x02\x6d\x32\x51\x91\x5a')
+        self.assertEqual(hessian2_dumps({'a': '1', 'b': '2', '#class': 'java.util.concurrent.ConcurrentHashMap'}), b'\x4d\x30\x26\x6a\x61\x76\x61\x2e\x75\x74\x69\x6c\x2e\x63\x6f\x6e\x63\x75\x72\x72\x65\x6e\x74\x2e\x43\x6f\x6e\x63\x75\x72\x72\x65\x6e\x74\x48\x61\x73\x68\x4d\x61\x70\x01\x61\x01\x31\x01\x62\x01\x32\x5a')
+
+        print(hessian2_dumps({'a': 'a', 'b': 3, '#class': 'org.example.Main.TestBean'}))
+
+    def test_decode_map(self):
+        self.assertEqual(hessian2_loads(b'\x48\x01\x61\x91\x01\x62\x4e\x01\x63\x01\x33\x5a'), {'a': 1, 'b': None, 'c': '3'})
+        self.assertEqual(hessian2_loads(b'\x48\x91\x01\x31\x92\x01\x32\x5a'), {1: '1', 2: '2'})
+        self.assertEqual(hessian2_loads(b'\x48\x5c\x03\x31\x2e\x30\x5f\x00\x00\x08\x98\x03\x32\x2e\x32\x5a'), {1.0: '1.0', 2.2: '2.2'})
+        self.assertEqual(hessian2_loads(b'\x48\x02\x6d\x31\x48\x01\x61\x01\x31\x01\x62\x01\x32\x5a\x02\x6d\x32\x51\x91\x5a'), {'m1': {'a': '1', 'b': '2'}, 'm2': {'a': '1', 'b': '2'}})
+
+    @staticmethod
+    def _read_file(filename: str) -> bytes:
         with open(filename, 'r') as f:
             return f.read().strip().encode().decode("unicode_escape").encode("latin1")

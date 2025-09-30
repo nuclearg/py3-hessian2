@@ -1,10 +1,9 @@
 from email.contentmanager import raw_data_manager
 
-import py3_hessian2_rsimpl
 from datetime import datetime
 import time
 from struct import pack, unpack
-from typing import Any
+from typing import Any, List
 
 try:
     import py3_hessian2_rsimpl
@@ -116,13 +115,16 @@ def hessian2_loads(data: bytes, *, assuming_x34_as_bytes: bool = False, **kwargs
     # if py3_hessian2_rsimpl:
     #     return py3_hessian2_rsimpl.hessian2_loads(data)
 
-    return Hessian2Deserializer(data).read(assuming_x34_as_bytes=assuming_x34_as_bytes)
+    return Hessian2Deserializer(data).read()
 
 
 class Hessian2Serializer:
 
     def __init__(self, **kwargs):
         self._bytes: bytearray = bytearray()
+        self._refs: Dict[str, int] = {}  # key 是对象 id
+        self._class_definitions: Dict[str, int] = {}
+        self._type_names: Dict[str, int] = {}
 
     def export(self) -> bytes:
         return bytes(self._bytes)
@@ -142,13 +144,10 @@ class Hessian2Serializer:
             self.write_bytes(v)
         elif isinstance(v, datetime):
             self.write_datetime(v)
-        elif isinstance(v, list) or isinstance(v, set):
+        elif isinstance(v, list):
             self.write_list(v)
         elif isinstance(v, dict):
-            if '#class' in v:
-                self.write_object(v)
-            else:
-                self.write_map(v)
+            self.write_map(v)
         else:
             raise ValueError('unsupported type: %s' % type(v))
 
@@ -258,8 +257,7 @@ class Hessian2Serializer:
             self._bytes.append(0x20)
             return
 
-        # 将字节数组按 4093 拆分为 chunks
-        # 至于为什么是 4093 是为了和 java 实现保持一致
+        # 将字节数组按 4093 拆分为 chunks，至于为什么是 4093 是为了和 java 实现保持一致
         chunks = [v[i:i + 4093] for i in range(0, len(v), 4093)]
         for idx, chunk in enumerate(chunks):
             is_last_chunk = idx == len(chunks) - 1
@@ -282,7 +280,7 @@ class Hessian2Serializer:
     def write_datetime(self, v: datetime) -> None:
         # date ::= x4a b7 b6 b5 b4 b3 b2 b1 b0
         #      ::= x4b b3 b2 b1 b0       # minutes since epoch
-        # only support 64-bit
+        # only support 64-bit timestamp
         ts = int(v.timestamp() * 1000)
         self._bytes.extend(pack('>cq', b'J', ts))
 
@@ -293,7 +291,8 @@ class Hessian2Serializer:
         #      ::= x58 int value*        # fixed-length untyped list
         #      ::= [x70-77] type value*  # fixed-length typed list
         #      ::= [x78-7f] value*       # fixed-length untyped list
-        # will only encode as fixed-length untyped list
+        # only encode as fixed-length untyped list
+        # TODO
         l = len(v)
         if l <= 15:
             self._bytes.append(0x78 + l)
@@ -306,23 +305,63 @@ class Hessian2Serializer:
     def write_map(self, v: dict) -> None:
         # map ::= 'M' type (value value)* 'Z'  # key, value map pairs
         # 	  ::= 'H' (value value)* 'Z'       # untyped key, value
-        raise NotImplementedError
+        if v is None:
+            self.write_null()
+            return
+        if self._try_write_ref(v):
+            return
+
+        cls_name = v.pop('#class', None)
+        if cls_name:
+            # 如果指定了 #class 则使用 M 协议，表示是一个 object
+            self._bytes.append(0x4d)
+            self._write_type(str(cls_name))
+        else:
+            # 如果未指定 #class 则使用 H 协议，对应 java.util.HashMap
+            self._bytes.append(0x48)
+
+        for k, v in v.items():
+            self.write(k)
+            self.write(v)
+        self._bytes.append(0x5a)
 
     def write_object(self, v: dict) -> None:
         # object ::= 'O' int value*
         # 	     ::= [x60-x6f] value*
+        # TODO
         raise NotImplementedError
 
-    def write_type(self, type_name: str) -> None:
-        raise NotImplementedError
+    def _write_type(self, type_name: str) -> None:
+        # type ::= string
+        #      ::= int
+        type_id = self._type_names.get(type_name, -1)
+        if type_id == -1:
+            self._type_names[type_name] = len(self._type_names)
+            self.write_string(type_name)
+        else:
+            self.write_int(type_id)
+
+    def _try_write_ref(self, o: Any) -> bool:
+        # ref ::= x51 int  # reference to nth map/list/object
+        idx = self._refs.get(id(o), -1)
+        if idx == -1:
+            self._refs[id(o)] = len(self._refs)
+            return False
+        else:
+            self._bytes.append(0x51)
+            self.write_int(idx)
+            return True
 
 
 class Hessian2Deserializer:
 
     def __init__(self, data: bytes, **kwargs):
         self._reader = _ByteReader(data)
+        self._refs: List[Any] = []
+        self._class_definitions: List[dict] = []
+        self._type_names: List[str] = []
 
-    def read(self, *, assuming_x34_as_bytes: bool) -> Any:
+    def read(self, **kwargs) -> Any:
         b = self._reader.look_byte()
         if b == 0x4e:  # 'N'
             # null ::= 'N'
@@ -352,11 +391,11 @@ class Hessian2Deserializer:
             #        ::= x5e b1 b0             # short cast to double
             #        ::= x5f b3 b2 b1 b0       # 32-bit float cast to double
             return self.read_float()
-        elif b == 0x52 or b == 0x53 or 0x00 <= b <= 0x1f or 0x30 <= b <= 0x33 or (b == 0x34 and not assuming_x34_as_bytes):
+        elif b == 0x52 or b == 0x53 or 0x00 <= b <= 0x1f or 0x30 <= b <= 0x33:
             # string ::= 'R' b1 b0 <utf8-data>  # non-final chunk
             #        ::= 'S' b1 b0 <utf8-data>  # string of length 0-65535
             #        ::= [x00-x1f] <utf8-data>  # string of length 0-31
-            #        ::= [x30-x34] <utf8-data>  # string of length 0-1023
+            #        ::= [x30-x33] <utf8-data>  # string of length 0-1023 协议原文写的是 x30-x34，但实际上 x34 表示的是 binary 不是 string
             return self.read_string()
         elif b == 0x41 or b == 0x42 or 0x20 <= b <= 0x2f or 0x34 <= b <= 0x37:
             # binary ::= 'A; b1 b0 <binary-data>  # non-final chunk
@@ -368,8 +407,30 @@ class Hessian2Deserializer:
             # date ::= x4a b7 b6 b5 b4 b3 b2 b1 b0
             #      ::= x4b b3 b2 b1 b0       # minutes since epoch
             return self.read_datetime()
+        elif b == 0x4d or b == 0x48:
+            # map ::= 'M' type (value value)* 'Z'  # key, value map pairs
+            #     ::= 'H' (value value)* 'Z'       # untyped key, value
+            return self.read_map()
+        elif b == 0x55 or b == 0x57 or 0x70 <= b <= 0x77 or 0x78 <= b <= 0x7f:
+            # list ::= x55 type value* 'Z'   # variable-length list
+            #      ::= 'V' type int value*   # fixed-length list
+            #      ::= x57 value* 'Z'        # variable-length untyped list
+            #      ::= x58 int value*        # fixed-length untyped list
+            #      ::= [x70-77] type value*  # fixed-length typed list
+            #      ::= [x78-7f] value*       # fixed-length untyped list
+            return self.read_list()
+        elif b == 0x4f or 0x60 <= b <= 0x6f:
+            # object ::= 'O' int value*
+            #        ::= [x60-x6f] value*
+            return self.read_object()
+        elif b == 0x51:
+            # ref ::= x51 int  # reference to nth map/list/object
+            return self.read_ref()
+        elif b == 0x43:
+            # class_def ::= 'C' string int string*
+            return self.read_class_def()
         else:
-            raise ValueError("Unsupported token: {b}")
+            raise ValueError(f'token error {b}')
 
     def read_null(self) -> None:
         # null ::= 'N'
@@ -412,7 +473,7 @@ class Hessian2Deserializer:
         if b == 0x59:
             v, = unpack('>l', self._reader.next_bytes(4))
             return v
-        raise AssertionError("Unsupported token: {b}")
+        raise ValueError(f'token error {b} at {self._reader.pos()}')
 
     def read_float(self) -> float:
         # double ::= 'D' b7 b6 b5 b4 b3 b2 b1 b0
@@ -438,7 +499,7 @@ class Hessian2Deserializer:
         if b == 0x5f:
             v, = unpack('>l', self._reader.next_bytes(4))
             return float(v / 1000)
-        raise AssertionError("Unsupported token: {b}")
+        raise ValueError(f'token error {b} at {self._reader.pos()}')
 
     def read_string(self) -> str:
         # string ::= 'R' b1 b0 <utf8-data>  # non-final chunk
@@ -464,7 +525,7 @@ class Hessian2Deserializer:
             l = ((b - 0x30) << 8) + self._reader.next_byte()
             buf.extend(self._read_utf8_bytes(l))
             return buf.decode()
-        raise AssertionError("Unsupported token: {b}")
+        raise ValueError(f'token error {b} at {self._reader.pos()}')
 
     def _read_utf8_bytes(self, n_chars: int) -> bytes:
         count = 0
@@ -510,7 +571,7 @@ class Hessian2Deserializer:
             l = ((b - 0x34) << 8) + self._reader.next_byte()
             buf.extend(self._reader.next_bytes(l))
             return bytes(buf)
-        raise AssertionError("Unsupported token: {b}")
+        raise ValueError(f'token error {b} at {self._reader.pos()}')
 
     def read_datetime(self) -> datetime:
         # date ::= x4a b7 b6 b5 b4 b3 b2 b1 b0
@@ -522,7 +583,64 @@ class Hessian2Deserializer:
         if b == 0x4b:
             v, = unpack('>l', self._reader.next_bytes(4))
             return datetime.fromtimestamp(v * 60)
-        raise AssertionError("Unsupported token: {b}")
+        raise ValueError(f'token error {b} at {self._reader.pos()}')
+
+    def read_list(self) -> list:
+        # list ::= x55 type value* 'Z'   # variable-length list
+        #      ::= 'V' type int value*   # fixed-length list
+        #      ::= x57 value* 'Z'        # variable-length untyped list
+        #      ::= x58 int value*        # fixed-length untyped list
+        #      ::= [x70-77] type value*  # fixed-length typed list
+        #      ::= [x78-7f] value*       # fixed-length untyped list
+        # TODO
+        pass
+
+    def read_map(self) -> dict:
+        # map ::= 'M' type (value value)* 'Z'  # key, value map pairs
+        # 	  ::= 'H' (value value)* 'Z'       # untyped key, value
+        v = {}
+        self._refs.append(v)
+        b = self._reader.next_byte()
+        if b == 0x4d:
+            v['#class'] = self.read_type()
+        elif b != 0x48:
+            raise ValueError(f'token error {b} at {self._reader.pos()}')
+
+        b = self._reader.look_byte()
+        while b != 0x5a:
+            k = self.read()
+            v[k] = self.read()
+            b = self._reader.look_byte()
+        self._reader.skip()
+
+        return v
+
+    def read_object(self) -> dict:
+        # object ::= 'O' int value*
+        #        ::= [x60-x6f] value*
+        # TODO
+        pass
+
+    def read_type(self) -> str:
+        # type ::= string
+        #      ::= int
+        t = self.read()
+        if isinstance(t, str):
+            self._type_names.append(t)
+            return t
+        if isinstance(t, int):
+            return self._type_names[t]
+        raise AssertionError(f'read type error {type(t)} at {self._reader.pos()}')
+
+    def read_ref(self) -> Any:
+        # ref ::= x51 int  # reference to nth map/list/object
+        self._reader.skip()
+        idx = self.read_int()
+        return self._refs[idx]
+
+    def read_class_def(self) -> dict:
+        # class_def ::= 'C' string int string*
+        pass
 
 
 class _ByteReader:
