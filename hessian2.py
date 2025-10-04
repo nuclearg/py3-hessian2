@@ -1,9 +1,7 @@
-from email.contentmanager import raw_data_manager
-
 from datetime import datetime
-import time
+from dataclasses import dataclass
 from struct import pack, unpack
-from typing import Any, List
+from typing import Any, List, Dict
 
 try:
     import py3_hessian2_rsimpl
@@ -119,10 +117,9 @@ def hessian2_loads(data: bytes, *, assuming_x34_as_bytes: bool = False, **kwargs
 
 
 class Hessian2Serializer:
-
     def __init__(self, **kwargs):
         self._bytes: bytearray = bytearray()
-        self._refs: Dict[str, int] = {}  # key 是对象 id
+        self._refs: Dict[int, int] = {}  # key 是对象 id
         self._class_definitions: Dict[str, int] = {}
         self._type_names: Dict[str, int] = {}
 
@@ -226,24 +223,59 @@ class Hessian2Serializer:
             self._bytes.append(0x00)
             return
 
-        l = len(v)  # 按字符计算，而不是按字节
+        l = self._calc_string_length(v)  # 按字符计算，而不是按字节
 
         if l <= 32:
             # utf-8 string length 0-32
             self._bytes.append(0x00 + l)
-            self._bytes.extend(v.encode())
+            self._write_utf8_bytes(v)
         elif l <= 1023:
             # utf-8 string length 0-1023
             self._bytes.append(0x30 + (l >> 8))
             self._bytes.append(l & 0xff)
-            self._bytes.extend(v.encode())
+            self._write_utf8_bytes(v)
         else:
             # utf-8 string split into 64K chunks
-            chunks = [v[i:i + 0x8000] for i in range(0, l, 0x8000)]
+            # FIXME: 字符串中存在扩展平面的字符时，直接按 65536 来 split 会出错
+            chunks = [v[i:i + 65535] for i in range(0, l, 65535)]
             for idx, chunk in enumerate(chunks):
                 is_last_chunk = idx == len(chunks) - 1
                 self._bytes.extend(pack('>cH', b'S' if is_last_chunk else b'R', len(chunk)))  # 'R' for non-final chunk, 'S' for final chunk
-                self._bytes.extend(chunk.encode())
+                self._write_utf8_bytes(v)
+
+    @staticmethod
+    def _calc_string_length(s: str) -> int:
+        # 不能简单使用 len()，hessian2 的 java 实现未正确处理 UTF-8 补充平面（4字节）情况，而是使用两个 char 强行拼接，python 实现必须兼容此情况，虽然与 unicode 规范不一致
+        return int((len(s.encode('utf-16')) - 2) / 2)
+
+    def _write_utf8_bytes(self, s: str) -> None:
+        simple = len(s) == self._calc_string_length(s)
+
+        if simple:
+            self._bytes.extend(s.encode())
+        else:
+            # 不能简单使用 encode()，hessian2 的 java 实现未正确处理 UTF-8 补充平面（4字节）情况，而是使用两个 char 强行拼接，python 实现必须兼容此情况，虽然与 unicode 规范不一致
+            buf = bytearray()
+            for c in s:
+                code_point = ord(c)
+                if code_point <= 0xffff:
+                    buf.extend(c.encode())
+                else:
+                    # 需要拆分为 utf16 代理对
+                    code_point -= 0x10000
+                    high_surrogate = (code_point >> 10) + 0xD800
+                    low_surrogate = (code_point & 0x3FF) + 0xDC00
+
+                    # 将高代理和低代理强行转成 utf8
+                    buf.extend([
+                        (0xE0 | (high_surrogate >> 12)),
+                        (0x80 | ((high_surrogate >> 6) & 0x3F)),
+                        (0x80 | (high_surrogate & 0x3F)),
+                        (0xE0 | (low_surrogate >> 12)),
+                        (0x80 | ((low_surrogate >> 6) & 0x3F)),
+                        (0x80 | (low_surrogate & 0x3F))
+                    ])
+            self._bytes.extend(buf)
 
     def write_bytes(self, v: bytes) -> None:
         # binary ::= 'A; b1 b0 <binary-data>  # non-final chunk
@@ -292,9 +324,8 @@ class Hessian2Serializer:
         #      ::= [x70-77] type value*  # fixed-length typed list
         #      ::= [x78-7f] value*       # fixed-length untyped list
         # only encode as fixed-length untyped list
-        # TODO
         l = len(v)
-        if l <= 15:
+        if l < 8:  # length 0-7 使用紧凑结构
             self._bytes.append(0x78 + l)
         else:
             self._bytes.append(0x58)
@@ -302,16 +333,16 @@ class Hessian2Serializer:
         for e in v:
             self.write(e)
 
-    def write_map(self, v: dict) -> None:
+    def write_map(self, o: dict) -> None:
         # map ::= 'M' type (value value)* 'Z'  # key, value map pairs
         # 	  ::= 'H' (value value)* 'Z'       # untyped key, value
-        if v is None:
+        if o is None:
             self.write_null()
             return
-        if self._try_write_ref(v):
+        if self._try_write_ref(o):
             return
 
-        cls_name = v.pop('#class', None)
+        cls_name = o.pop('#class', None)
         if cls_name:
             # 如果指定了 #class 则使用 M 协议，表示是一个 object
             self._bytes.append(0x4d)
@@ -320,16 +351,10 @@ class Hessian2Serializer:
             # 如果未指定 #class 则使用 H 协议，对应 java.util.HashMap
             self._bytes.append(0x48)
 
-        for k, v in v.items():
+        for k, v in o.items():
             self.write(k)
             self.write(v)
         self._bytes.append(0x5a)
-
-    def write_object(self, v: dict) -> None:
-        # object ::= 'O' int value*
-        # 	     ::= [x60-x6f] value*
-        # TODO
-        raise NotImplementedError
 
     def _write_type(self, type_name: str) -> None:
         # type ::= string
@@ -354,11 +379,43 @@ class Hessian2Serializer:
 
 
 class Hessian2Deserializer:
+    class _ByteReader:
+        def __init__(self, data: bytes):
+            self._data = data
+            self._pos = 0
 
+        def look_byte(self) -> int:
+            return self._data[self._pos]
+
+        def next_byte(self) -> int:
+            v = self._data[self._pos]
+            self._pos += 1
+            return v
+
+        def next_bytes(self, length: int) -> bytes:
+            v = self._data[self._pos:self._pos + length]
+            self._pos += length
+            return v
+
+        def skip(self, length: int = 1) -> None:
+            self._pos += length
+
+        def pos(self) -> int:
+            return self._pos
+
+        def raw_data_unsafe(self) -> bytes:
+            return self._data
+
+    @dataclass(frozen=True)
+    class _ClsDefinition:
+        cls_name: str
+        field_names: list
+
+    ### entry
     def __init__(self, data: bytes, **kwargs):
-        self._reader = _ByteReader(data)
+        self._reader = Hessian2Deserializer._ByteReader(data)
         self._refs: List[Any] = []
-        self._class_definitions: List[dict] = []
+        self._cls_definitions: List[Hessian2Deserializer._ClsDefinition] = []
         self._type_names: List[str] = []
 
     def read(self, **kwargs) -> Any:
@@ -428,7 +485,8 @@ class Hessian2Deserializer:
             return self.read_ref()
         elif b == 0x43:
             # class_def ::= 'C' string int string*
-            return self.read_class_def()
+            self.read_class_def()
+            return self.read()  # 单独读取一个 class_def 无意义，它并不表示一个值，需要再往下读一个
         else:
             raise ValueError(f'token error {b}')
 
@@ -532,6 +590,7 @@ class Hessian2Deserializer:
         pos = self._reader.pos()
         start_pos = self._reader.pos()
         raw_data = self._reader.raw_data_unsafe()
+
         while count < n_chars:
             count += 1
 
@@ -541,11 +600,44 @@ class Hessian2Deserializer:
             elif b < 0xe0:
                 pos += 2
             elif b < 0xf0:
+                # 需要额外检查是否是 utf16 的高代理和低代理，hessian2 的 java 实现未正确处理 UTF-8 补充平面（4字节）情况，而是使用两个 char 强行拼接，python 实现必须兼容此情况，虽然与 unicode 规范不一致
+                b_next = raw_data[pos + 1]
+                if (b == 0xed) and (0xa0 <= b_next <= 0xbf):  # 高代理 or 低代理
+                    # 启动兼容模式，此模式性能降低
+                    return self._reader.next_bytes(pos - start_pos) + self._read_utf8_bytes_utf16_compatible_mode(n_chars - count + 1)
+
                 pos += 3
             else:
                 pos += 4
 
         return self._reader.next_bytes(pos - start_pos)
+
+    def _read_utf8_bytes_utf16_compatible_mode(self, n_chars: int) -> bytearray:
+        count = 0
+        buf = bytearray()
+        while count < n_chars:
+            count += 1
+
+            b = self._reader.look_byte()
+            if b < 0x80:
+                buf.extend(self._reader.next_bytes(1))
+            elif b < 0xe0:
+                buf.extend(self._reader.next_bytes(2))
+            elif b < 0xf0:
+                tmp = self._reader.next_bytes(3)
+
+                if (tmp[0] == 0xed) and (0xa0 <= tmp[1] <= 0xbf):  # 高代理 or 低代理
+                    high_surrogate = ((tmp[0] & 0b00001111) << 12) | ((tmp[1] & 0b00111111) << 6) | (tmp[2] & 0b00111111) # 高代理 utf8 转为 unicode
+                    tmp = self._reader.next_bytes(3)
+                    low_surrogate = ((tmp[0] & 0b00001111) << 12) | ((tmp[1] & 0b00111111) << 6) | (tmp[2] & 0b00111111) # 低代理 utf8 转为 unicode
+                    code_point = 0x10000 + ((high_surrogate - 0xD800) << 10) + (low_surrogate - 0xDC00) # 高低代理合并
+                    buf.extend(chr(code_point).encode()) # 转 utf8
+                    count += 1 # 消耗掉低代理占用的 count
+                else:
+                    buf.extend(tmp)
+            else:
+                buf.extend(self._reader.next_bytes(4))
+        return buf
 
     def read_bytes(self) -> bytes:
         # binary ::= 'A; b1 b0 <binary-data>  # non-final chunk
@@ -592,8 +684,42 @@ class Hessian2Deserializer:
         #      ::= x58 int value*        # fixed-length untyped list
         #      ::= [x70-77] type value*  # fixed-length typed list
         #      ::= [x78-7f] value*       # fixed-length untyped list
-        # TODO
-        pass
+        b = self._reader.next_byte()
+        if b == 0x55:
+            self.read_type()
+            return self._read_variable_length_list()
+        if b == 0x56:
+            self.read_type()
+            length = self.read_int()
+            return self._read_fixed_length_list(length)
+        if b == 0x57:
+            return self._read_variable_length_list()
+        if b == 0x58:
+            length = self.read_int()
+            return self._read_fixed_length_list(length)
+        if 0x70 <= b <= 0x77:
+            self.read_type()
+            return self._read_fixed_length_list(b - 0x70)
+        if 0x78 <= b <= 0x7f:
+            length = b - 0x78
+            return self._read_fixed_length_list(length)
+        raise ValueError(f'token error {b} at {self._reader.pos()}')
+
+    def _read_fixed_length_list(self, length: int) -> list:
+        l = [None] * length
+        for i in range(length):
+            l[i] = self.read()
+        return l
+
+    def _read_variable_length_list(self) -> list:
+        l = []
+        while True:
+            b = self._reader.look_byte()
+            if b == 0x5a:
+                self._reader.skip()
+                break
+            l.append(self.read())
+        return l
 
     def read_map(self) -> dict:
         # map ::= 'M' type (value value)* 'Z'  # key, value map pairs
@@ -618,8 +744,22 @@ class Hessian2Deserializer:
     def read_object(self) -> dict:
         # object ::= 'O' int value*
         #        ::= [x60-x6f] value*
-        # TODO
-        pass
+        b = self._reader.next_byte()
+        if b == 0x4f:
+            cls_definition = self._cls_definitions[self.read_int()]
+        elif 0x60 <= b <= 0x6f:
+            cls_definition = self._cls_definitions[b - 0x60]
+        else:
+            raise ValueError(f'token error {b} at {self._reader.pos()}')
+        v = {'#class': cls_definition.cls_name}
+        for field_name in cls_definition.field_names:
+            v[field_name] = self.read()
+        return v
+
+    def _try_read_special_object(self, o: dict) -> Any:
+        b = self._reader.look_byte()
+        if b == 0x51:
+            return self.read_ref()
 
     def read_type(self) -> str:
         # type ::= string
@@ -638,37 +778,15 @@ class Hessian2Deserializer:
         idx = self.read_int()
         return self._refs[idx]
 
-    def read_class_def(self) -> dict:
+    def read_class_def(self) -> _ClsDefinition:
         # class_def ::= 'C' string int string*
-        pass
-
-
-class _ByteReader:
-    def __init__(self, data: bytes):
-        self._data = data
-        self._pos = 0
-
-    def look_byte(self) -> int:
-        return self._data[self._pos]
-
-    def next_byte(self) -> int:
-        v = self._data[self._pos]
-        self._pos += 1
-        return v
-
-    def next_bytes(self, length: int) -> bytes:
-        v = self._data[self._pos:self._pos + length]
-        self._pos += length
-        return v
-
-    def skip(self, length: int = 1) -> None:
-        self._pos += length
-
-    def pos(self) -> int:
-        return self._pos
-
-    def raw_data_unsafe(self) -> bytes:
-        return self._data
+        self._reader.skip()
+        cls_name = self.read_string()
+        field_count = self.read_int()
+        field_names = [self.read_string() for _ in range(field_count)]
+        cls_definition = Hessian2Deserializer._ClsDefinition(cls_name, field_names)
+        self._cls_definitions.append(cls_definition)
+        return cls_definition
 
 
 def helloworld():
