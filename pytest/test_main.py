@@ -1,8 +1,20 @@
 import datetime
 import os
 import unittest
+from collections import UserList
 
 from hessian2 import hessian2_dumps, hessian2_loads
+
+
+class TypeConstants:
+    BOOLEAN_ARRAY = '[boolean'
+    SHORT_ARRAY = '[short'
+    INT_ARRAY = '[int'
+    LONG_ARRAY = '[long'
+    FLOAT_ARRAY = '[float'
+    DOUBLE_ARRAY = '[double'
+    STRING_ARRAY = '[string'
+    OBJECT_ARRAY = '[object'
 
 
 class Test(unittest.TestCase):
@@ -200,6 +212,14 @@ class Test(unittest.TestCase):
         self.assertEqual(hessian2_dumps([1, 1, 1, 1]), b'\x7c\x91\x91\x91\x91')
         self.assertEqual(hessian2_dumps([None, None, None]), b'\x7b\x4e\x4e\x4e')
 
+        # 带类型
+        l = UserList([1, 2, 3])
+        l.__dict__['#class'] = TypeConstants.INT_ARRAY
+        self.assertEqual(hessian2_dumps(l), b'\x73\x04\x5b\x69\x6e\x74\x91\x92\x93')
+        l = UserList(['a'] * 256)
+        l.__dict__['#class'] = TypeConstants.STRING_ARRAY
+        self.assertEqual(hessian2_dumps(l), b'\x56\x07\x5b\x73\x74\x72\x69\x6e\x67\xc9\x00' + b'\x01\x61' * 256)
+
     def test_decode_list(self):
         self.assertEqual(hessian2_loads(b'\x78'), [])
         self.assertEqual(hessian2_loads(b'\x79\x91'), [1])
@@ -218,6 +238,14 @@ class Test(unittest.TestCase):
         self.assertEqual(hessian2_loads(b'\x7a\xcb\xe8\xcf\xd0'), [1000, 2000])
         self.assertEqual(hessian2_loads(b'\x79\x01\xc3\xbc'), ['ü'])
         self.assertEqual(hessian2_loads(b'\x79\x22\x01\x02'), [b'\x01\x02'])
+
+        # 带类型
+        l = hessian2_loads(b'\x73\x04\x5b\x69\x6e\x74\x91\x92\x93')
+        self.assertEqual(l, [1, 2, 3])
+        self.assertEqual(l.__dict__['#class'], TypeConstants.INT_ARRAY)
+        l = hessian2_loads(b'\x56\x07\x5b\x73\x74\x72\x69\x6e\x67\xc9\x00' + b'\x01\x61' * 256)
+        self.assertEqual(l, ['a'] * 256)
+        self.assertEqual(l.__dict__['#class'], TypeConstants.STRING_ARRAY)
 
     def test_encode_map(self):
         self.assertEqual(hessian2_dumps({'a': 1, 'b': None, 'c': '3'}), b'\x48\x01\x61\x91\x01\x62\x4e\x01\x63\x01\x33\x5a')
@@ -266,7 +294,7 @@ class Test(unittest.TestCase):
         self.assertEqual(hessian2_loads(b'\x48\x4c\x80\x00\x00\x00\x00\x00\x00\x00\x4c\x80\x00\x00\x00\x00\x00\x00\x00\x5a'), {-9223372036854775808: -9223372036854775808})
 
     def test_encode_object(self):
-        print(hessian2_dumps({'#class': 'org.example.Main$TestBean', 'a': 1, 'b': 'b'}))
+        self.assertEqual(hessian2_dumps({'#class': 'org.example.Main$TestBean', 'a': 1, 'b': 'b'}), b'M\x19org.example.Main$TestBean\x01a\x91\x01b\x01bZ')
 
     def test_decode_object(self):
         self.assertEqual(hessian2_loads(b'\x43\x19\x6f\x72\x67\x2e\x65\x78\x61\x6d\x70\x6c\x65\x2e\x4d\x61\x69\x6e\x24\x54\x65\x73\x74\x42\x65\x61\x6e\x92\x01\x61\x01\x62\x60\x91\x01\x62'), {'#class': 'org.example.Main$TestBean', 'a': 1, 'b': 'b'})

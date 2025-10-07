@@ -1,7 +1,8 @@
-from datetime import datetime
+from collections import UserList
 from dataclasses import dataclass
+from datetime import datetime
 from struct import pack, unpack
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Sequence, Union
 
 try:
     import py3_hessian2_rsimpl
@@ -141,7 +142,7 @@ class Hessian2Serializer:
             self.write_bytes(v)
         elif isinstance(v, datetime):
             self.write_datetime(v)
-        elif isinstance(v, list):
+        elif isinstance(v, Sequence):
             self.write_list(v)
         elif isinstance(v, dict):
             self.write_map(v)
@@ -316,19 +317,28 @@ class Hessian2Serializer:
         ts = int(v.timestamp() * 1000)
         self._bytes.extend(pack('>cq', b'J', ts))
 
-    def write_list(self, v: list) -> None:
+    def write_list(self, v: Sequence[Any]) -> None:
         # list ::= x55 type value* 'Z'   # variable-length list
         #      ::= 'V' type int value*   # fixed-length list
         #      ::= x57 value* 'Z'        # variable-length untyped list
         #      ::= x58 int value*        # fixed-length untyped list
         #      ::= [x70-77] type value*  # fixed-length typed list
         #      ::= [x78-7f] value*       # fixed-length untyped list
-        # only encode as fixed-length untyped list
         l = len(v)
+        cls_name = str(v.__dict__['#class']) if hasattr(v, '__dict__') and '#class' in v.__dict__ else None
+
         if l < 8:  # length 0-7 使用紧凑结构
-            self._bytes.append(0x78 + l)
+            if cls_name:
+                self._bytes.append(0x70 + l)
+                self._write_type(cls_name)
+            else:
+                self._bytes.append(0x78 + l)
         else:
-            self._bytes.append(0x58)
+            if cls_name:
+                self._bytes.append(0x56)
+                self._write_type(cls_name)
+            else:
+                self._bytes.append(0x58)
             self.write_int(l)
         for e in v:
             self.write(e)
@@ -468,9 +478,9 @@ class Hessian2Deserializer:
             # map ::= 'M' type (value value)* 'Z'  # key, value map pairs
             #     ::= 'H' (value value)* 'Z'       # untyped key, value
             return self.read_map()
-        elif b == 0x55 or b == 0x57 or 0x70 <= b <= 0x77 or 0x78 <= b <= 0x7f:
+        elif 0x55 <= b <= 0x58 or 0x70 <= b <= 0x77 or 0x78 <= b <= 0x7f:
             # list ::= x55 type value* 'Z'   # variable-length list
-            #      ::= 'V' type int value*   # fixed-length list
+            #      ::= x56 type int value*   # fixed-length list
             #      ::= x57 value* 'Z'        # variable-length untyped list
             #      ::= x58 int value*        # fixed-length untyped list
             #      ::= [x70-77] type value*  # fixed-length typed list
@@ -627,12 +637,12 @@ class Hessian2Deserializer:
                 tmp = self._reader.next_bytes(3)
 
                 if (tmp[0] == 0xed) and (0xa0 <= tmp[1] <= 0xbf):  # 高代理 or 低代理
-                    high_surrogate = ((tmp[0] & 0b00001111) << 12) | ((tmp[1] & 0b00111111) << 6) | (tmp[2] & 0b00111111) # 高代理 utf8 转为 unicode
+                    high_surrogate = ((tmp[0] & 0b00001111) << 12) | ((tmp[1] & 0b00111111) << 6) | (tmp[2] & 0b00111111)  # 高代理 utf8 转为 unicode
                     tmp = self._reader.next_bytes(3)
-                    low_surrogate = ((tmp[0] & 0b00001111) << 12) | ((tmp[1] & 0b00111111) << 6) | (tmp[2] & 0b00111111) # 低代理 utf8 转为 unicode
-                    code_point = 0x10000 + ((high_surrogate - 0xD800) << 10) + (low_surrogate - 0xDC00) # 高低代理合并
-                    buf.extend(chr(code_point).encode()) # 转 utf8
-                    count += 1 # 消耗掉低代理占用的 count
+                    low_surrogate = ((tmp[0] & 0b00001111) << 12) | ((tmp[1] & 0b00111111) << 6) | (tmp[2] & 0b00111111)  # 低代理 utf8 转为 unicode
+                    code_point = 0x10000 + ((high_surrogate - 0xD800) << 10) + (low_surrogate - 0xDC00)  # 高低代理合并
+                    buf.extend(chr(code_point).encode())  # 转 utf8
+                    count += 1  # 消耗掉低代理占用的 count
                 else:
                     buf.extend(tmp)
             else:
@@ -679,39 +689,43 @@ class Hessian2Deserializer:
 
     def read_list(self) -> list:
         # list ::= x55 type value* 'Z'   # variable-length list
-        #      ::= 'V' type int value*   # fixed-length list
+        #      ::= x56 type int value*   # fixed-length list
         #      ::= x57 value* 'Z'        # variable-length untyped list
         #      ::= x58 int value*        # fixed-length untyped list
         #      ::= [x70-77] type value*  # fixed-length typed list
         #      ::= [x78-7f] value*       # fixed-length untyped list
         b = self._reader.next_byte()
         if b == 0x55:
-            self.read_type()
-            return self._read_variable_length_list()
+            cls_name = self.read_type()
+            return self._read_variable_length_list(cls_name)
         if b == 0x56:
-            self.read_type()
+            cls_name = self.read_type()
             length = self.read_int()
-            return self._read_fixed_length_list(length)
+            return self._read_fixed_length_list(length, cls_name)
         if b == 0x57:
             return self._read_variable_length_list()
         if b == 0x58:
             length = self.read_int()
             return self._read_fixed_length_list(length)
         if 0x70 <= b <= 0x77:
-            self.read_type()
-            return self._read_fixed_length_list(b - 0x70)
+            cls_name = self.read_type()
+            return self._read_fixed_length_list(b - 0x70, cls_name)
         if 0x78 <= b <= 0x7f:
             length = b - 0x78
             return self._read_fixed_length_list(length)
         raise ValueError(f'token error {b} at {self._reader.pos()}')
 
-    def _read_fixed_length_list(self, length: int) -> list:
+    def _read_fixed_length_list(self, length: int, cls_name: str = None) -> Union[list, UserList]:
         l = [None] * length
         for i in range(length):
             l[i] = self.read()
+        if cls_name:
+            typed_list = UserList(l)
+            typed_list.__dict__['#class'] = cls_name
+            return typed_list
         return l
 
-    def _read_variable_length_list(self) -> list:
+    def _read_variable_length_list(self, cls_name: str = None) -> Union[list, UserList]:
         l = []
         while True:
             b = self._reader.look_byte()
@@ -719,6 +733,10 @@ class Hessian2Deserializer:
                 self._reader.skip()
                 break
             l.append(self.read())
+        if cls_name:
+            typed_list = UserList(l)
+            typed_list.__dict__['#class'] = cls_name
+            return typed_list
         return l
 
     def read_map(self) -> dict:
