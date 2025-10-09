@@ -63,7 +63,18 @@ Hessian Bytecode map:
 """
 
 
-def hessian2_dumps(v: Any, **kwargs) -> bytes:
+class TypeConstants:
+    BOOLEAN_ARRAY = '[boolean'
+    SHORT_ARRAY = '[short'
+    INT_ARRAY = '[int'
+    LONG_ARRAY = '[long'
+    FLOAT_ARRAY = '[float'
+    DOUBLE_ARRAY = '[double'
+    STRING_ARRAY = '[string'
+    OBJECT_ARRAY = '[object'
+
+
+def dumps(v: Any, **kwargs) -> bytes:
     """
     将一个对象按照 hessian 序列化协议转换为字节数组
 
@@ -91,7 +102,7 @@ def hessian2_dumps(v: Any, **kwargs) -> bytes:
     return serializer.export()
 
 
-def hessian2_loads(data: bytes, *, assuming_x34_as_bytes: bool = False, **kwargs) -> Any:
+def loads(data: bytes, **kwargs) -> Any:
     """
     将字节数组按照 hessian 序列化协议转换为对象
 
