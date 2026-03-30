@@ -155,6 +155,16 @@ class Test(unittest.TestCase):
         self.assertEqual(loads(b'\x03\xf0\x9f\x9a\x80\xf0\x9f\x8c\x9f\xf0\x9f\x98\x8a'), '🚀🌟😊')
         self.assertEqual(loads(b'\x06\xed\xa0\xbd\xed\xba\x80\xed\xa0\xbc\xed\xbc\x9f\xed\xa0\xbd\xed\xb8\x8a'), '🚀🌟😊')
 
+    def test_string_compact_length_31_32_boundary(self):
+        # Single-byte string tags are 0x00-0x1f (length 0-31). 0x20 is compact binary, not UTF-8 string.
+        s31 = 'a' * 31
+        s32 = 'a' * 32
+        self.assertEqual(dumps(s31), b'\x1f' + b'a' * 31)
+        self.assertEqual(dumps(s32), b'\x30\x20' + b'a' * 32)
+        self.assertEqual(loads(dumps(s31)), s31)
+        self.assertEqual(loads(dumps(s32)), s32)
+        self.assertEqual(loads(b'\x30\x20' + b'a' * 32), s32)
+
     def test_encode_date(self):
         self.assertEqual(dumps(datetime.datetime(2021, 2, 3, 11, 22, 33)), b'\x4a\x00\x00\x01\x77\x65\xe9\xbc\xa8')
 

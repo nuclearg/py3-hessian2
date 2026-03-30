@@ -15,7 +15,7 @@ Hessian 2.0 Protocol
 see http://hessian.caucho.com/doc/hessian-serialization.html
 
 Hessian Bytecode map:
-    x00 - x1f    # utf-8 string length 0-32
+    x00 - x1f    # utf-8 string length 0-31
     x20 - x2f    # binary data length 0-16
     x30 - x33    # utf-8 string length 0-1023
     x34 - x37    # binary data length 0-1023
@@ -237,8 +237,8 @@ class Hessian2Serializer:
 
         l = self._calc_string_length(v)  # 按字符计算，而不是按字节
 
-        if l <= 32:
-            # utf-8 string length 0-32
+        if l <= 31:
+            # utf-8 string length 0-31（0x20 起为 binary 短格式，不可用于字符串）
             self._bytes.append(0x00 + l)
             self._write_utf8_bytes(v)
         elif l <= 1023:
